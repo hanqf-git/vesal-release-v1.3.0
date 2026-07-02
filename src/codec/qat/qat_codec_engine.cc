@@ -19,6 +19,7 @@
 
 #include "qat_codec_engine.h"
 
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -282,6 +283,18 @@ Status QatCodecEngine::Close() {
         return OkStatus();
     }
     g_periodic_scheduler.CompleteTask(periodic_task_id_);
+
+#ifdef VESAL_ENABLE_QAT_DUMP
+    static std::atomic<bool> dump_all_rings_called{false};
+    bool expected = false;
+    if (dump_all_rings_called.compare_exchange_strong(expected, true)) {
+        StatusCode dump_status = qat_handle_->DumpAllRings();
+        if (!IsOk(dump_status)) {
+            VESAL_LOG(WARN) << "dcDumpAllRings failed, status=" << dump_status;
+        }
+    }
+#endif
+
     auto r = qat_handle_->Uninit();
     if (!r.ok()) {
         VESAL_LOG(ERROR) << "Fail to uninit QAT handle, r=" << r << ", in_qat_num_=" << in_qat_num_;

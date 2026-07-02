@@ -41,6 +41,7 @@ option(VESAL_ENABLE_GCOV "Build with coverage analysis" OFF)
 option(VESAL_ENABLE_ZSTD "Build with zstd related functionality" OFF)
 option(VESAL_ENABLE_LZ4IPP "Build with lz4 ipp feature" OFF)
 option(VESAL_ENABLE_ERR_SIM "Build with error simulation enabled" OFF)
+option(dump_enable "Build with QAT dcDumpAllRings enabled" OFF)
 option(VESAL_BUILD_BENCH "Build benchmarks or not" OFF)
 option(VESAL_ENABLE_SSL "Build openssl or not" ON)
 option(VESAL_ENABLE_KAE "Build KAE codec support or not" ON)
@@ -100,6 +101,10 @@ if (VESAL_ENABLE_ERR_SIM)
 endif()
 
 add_library(vesal_internal_includes INTERFACE)
+
+if (dump_enable)
+  target_compile_definitions(vesal_internal_includes INTERFACE VESAL_ENABLE_QAT_DUMP)
+endif()
 
 if(VESAL_ENABLE_KAE)
   target_compile_options(vesal_compile_options INTERFACE -DVESAL_ENABLE_KAE)

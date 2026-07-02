@@ -56,6 +56,10 @@ public:
     // quoto = 0 means no quota limitation. Poll as much as possible.
     StatusCode PollInstance(int quota = 0);
 
+#ifdef VESAL_ENABLE_QAT_DUMP
+    StatusCode DumpAllRings();
+#endif
+
     QatUnit* GetUnit() {
         return unit_;
     }

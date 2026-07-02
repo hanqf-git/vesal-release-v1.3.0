@@ -36,6 +36,9 @@ DEFINE_double(compress_ratio,
 DEFINE_string(data_fill_mode,
               "4kb",
               "Input data fill mode: 4kb fills each 4KB chunk, block fills the whole input block");
+DEFINE_bool(enable_zero_block,
+            false,
+            "Enable occasional random all-zero input buffer");
 
 struct AsyncWindow;
 
@@ -63,8 +66,16 @@ size_t MaxCompressedCapacity(size_t input_size) {
 
 void FillInputByCompressRatio(std::vector<unsigned char>* buf, std::mt19937_64* rng) {
     const size_t kBlockSize = 4 * 1024;
+    const uint32_t kZeroBufferChance = 16;
     buf->assign(buf->size(), 0);
     std::uniform_int_distribution<int> dist(0, 255);
+
+    if (FLAGS_enable_zero_block) {
+        std::uniform_int_distribution<uint32_t> zero_buffer_chance(0, kZeroBufferChance - 1);
+        if (zero_buffer_chance(*rng) == 0) {
+            return;
+        }
+    }
 
     if (FLAGS_data_fill_mode == "block") {
         size_t rand_len = static_cast<size_t>(buf->size() * FLAGS_compress_ratio);

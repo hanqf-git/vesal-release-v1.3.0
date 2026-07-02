@@ -193,6 +193,20 @@ StatusCode QatHandle::PollInstance(int quota) {
     return CpaStatusToVesalStatusCode(cpa_status);
 }
 
+#ifdef VESAL_ENABLE_QAT_DUMP
+StatusCode QatHandle::DumpAllRings() {
+    if (unit_ == nullptr) {
+        return StatusCode::kInvalidArgument;
+    }
+    CpaInstanceHandle* inst_hdl = unit_->GetInstanceHandle();
+    auto unit_attr = unit_->GetQatUnitAttr();
+    VESAL_LOG(INFO) << "Calling dcDumpAllRings before closing QAT engine, device="
+                    << unit_attr.device_id << ", instance=" << unit_attr.instance_id;
+    CpaStatus cpa_status = GetQatApiWrapper()->QAT_dcDumpAllRings(*inst_hdl);
+    return CpaStatusToVesalStatusCode(cpa_status);
+}
+#endif
+
 StatusCode QatHandle::TryCloseSession(QatSession* session) {
     int cnt = 10;
     StatusCode ret = session->Close().code();

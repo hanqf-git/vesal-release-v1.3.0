@@ -30,6 +30,10 @@ extern "C" {
 #include <cpa_dc.h>        // CpaDcSessionHandle, CpaDcOpData, CpaDcRqResults, cpaDcCompressData2
 #include <icp_sal_poll.h>  // icp_sal_DcPollInstance
 #include <icp_sal_user.h>  // icp_sal_userStart
+
+#ifdef VESAL_ENABLE_QAT_DUMP
+CpaStatus dcDumpAllRings(CpaInstanceHandle instanceHandle) __attribute__((weak));
+#endif
 }
 
 namespace vesal {
@@ -114,6 +118,15 @@ public:
                                                  Cpa32U response_quota) {
         return icp_sal_DcPollInstance(instanceHandle, response_quota);
     }
+
+#ifdef VESAL_ENABLE_QAT_DUMP
+    virtual CpaStatus QAT_dcDumpAllRings(CpaInstanceHandle instanceHandle) {
+        if (dcDumpAllRings == nullptr) {
+            return CPA_STATUS_UNSUPPORTED;
+        }
+        return dcDumpAllRings(instanceHandle);
+    }
+#endif
 
     virtual CpaStatus QAT_icp_sal_CyPollInstance(CpaInstanceHandle instanceHandle,
                                                  Cpa32U response_quota) {

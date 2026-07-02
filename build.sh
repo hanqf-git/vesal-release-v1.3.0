@@ -17,7 +17,7 @@
 # You should have received a copy of the GNU Lesser General Public License
 # along with veSAL. If not, see <https://www.gnu.org/licenses/>.
 
-help_message="$(basename "$0") [--debug] [--release] [--asan] [--gcov] [--disable_test] [--disable_perf] [--disable_zstd] [--enable_lz4ipp] [--enable_err_sim] [--enable_bench] [--disable_sw_cy] [-h]
+help_message="$(basename "$0") [--debug] [--release] [--asan] [--gcov] [--disable_test] [--disable_perf] [--disable_zstd] [--enable_lz4ipp] [--enable_err_sim] [--dump_enable] [--enable_bench] [--disable_sw_cy] [-h]
 
 where:
     -h|--help                         Show this help message.
@@ -30,6 +30,7 @@ where:
     --disable_zstd                    Disable zstd related functionality.
     --enable_lz4ipp                   Enable lz4 ipp feature.
     --enable_err_sim                  Enable error simulation.
+    --dump_enable|--enable_dump       Enable QAT dcDumpAllRings before QAT engine close.
     --enable_metrics                  Enable metrics for perf, zstd and test will be disabled.
     --enable_bench                    Enable build benchmark.
     --disable_sw_cy                   Disable build software cypher and openssl
@@ -46,6 +47,7 @@ ENABLE_PERF="ON"
 ENABLE_ZSTD="ON"
 ENABLE_LZ4IPP="OFF"
 ENABLE_ERR_SIM="OFF"
+ENABLE_QAT_DUMP="OFF"
 ENABLE_METRICS="OFF"
 ENABLE_BENCH="OFF"
 ENABLE_SSL="ON"
@@ -94,6 +96,10 @@ while [[ $# > 0 ]]; do
             ENABLE_ERR_SIM="ON"
             echo "enable error simulation"
             ;;
+        --dump_enable|--enable_dump)
+            ENABLE_QAT_DUMP="ON"
+            echo "enable QAT dcDumpAllRings"
+            ;;
         --enable_metrics)
             ENABLE_METRICS="ON"
             # Disable following options to prevent dependency conflicts
@@ -130,6 +136,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=${BUILD_TYPE} \
     -DVESAL_BUILD_PERF=$ENABLE_PERF \
     -DVESAL_ENABLE_ZSTD=$ENABLE_ZSTD \
     -DVESAL_ENABLE_ERR_SIM=$ENABLE_ERR_SIM \
+    -Ddump_enable=$ENABLE_QAT_DUMP \
     -DVESAL_ENABLE_LZ4IPP=$ENABLE_LZ4IPP $SOURCE_DIR \
     -DVESAL_ENABLE_BYTE_METRICS=$ENABLE_METRICS \
     -DVESAL_BUILD_BENCH=$ENABLE_BENCH \
