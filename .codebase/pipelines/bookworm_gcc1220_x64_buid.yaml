@@ -1,0 +1,17 @@
+name: veSAL gcc1220 x64 build
+trigger:
+  # Run merge request pipeline automatically
+  # https://bytedance.feishu.cn/wiki/wikcn0XxotllYX3nzz7AEv1h07d#1gAE9h
+  change:
+  # https://bytedance.feishu.cn/wiki/wikcnmGR04aP3KhZmqr4qxDMNfb
+  manual:
+
+jobs:
+  gcc630-x64-build:
+    name: Build on gcc1220
+    image: hub.byted.org/x86_64/compile/vesal-bookworm-gcc1220:a45a5766b0e5a5cdb0bc6d5ef2973de7
+    working-directory: vesal
+    steps:
+      - name: Build
+        commands:
+          - bash build.sh --enable_err_sim

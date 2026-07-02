@@ -1,0 +1,34 @@
+name: veSAL CI Pipeline
+trigger:
+  # Run merge request pipeline automatically
+  # https://bytedance.feishu.cn/wiki/wikcn0XxotllYX3nzz7AEv1h07d#1gAE9h
+  change:
+  # https://bytedance.feishu.cn/wiki/wikcnmGR04aP3KhZmqr4qxDMNfb
+  manual:
+
+jobs:
+  vesal-ci:
+    name: vesal CI
+    image: none
+    runs-on:
+      cluster: "vesal_ci"
+      linux: {}
+    working-directory: "/data03/codebase_ci/ci_work_dir/${{random_string(16)}}"
+    steps:
+      - name: Run
+        commands:
+          - python3 run_ci.py
+      - name: Gcov
+        uses: actions/codecov
+        inputs:
+          driver: custom
+          language: cpp
+          commands:
+            - file vesal_final.info
+          outcome:
+            coverage_format: lcov
+            coverage_paths: ["vesal_final.info"]
+      - name: Clean
+        if: "${{always()}}"
+        commands:
+          - rm -rf $(pwd)

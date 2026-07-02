@@ -1,0 +1,8 @@
+# tests depend on "sleep" for ordering guarantees
+./qat_codec_channel_test
+./qat_codec_shared_channel_test
+./scheduler_test
+# Valgrind doesn’t recognize dsa-related assembly instructions
+./data_flow_channel_test
+./data_flow_engines_test
+./dsa_ctx_factory_test

@@ -1,0 +1,24 @@
+name: valgrind test
+trigger:
+  cron:
+  manual:
+
+jobs:
+  valgrind-test:
+    name: valgrind test
+    image: none
+    runs-on:
+      cluster: "vesal_ci"
+      linux: {}
+    working-directory: "/data03/codebase_ci/ci_work_dir/${{random_string(16)}}"
+    steps:
+      - name: Build
+        commands:
+          - ./build.sh
+      - name: Test
+        commands:
+          - bash ./valgrind_check.sh
+      - name: Clean
+        if: "${{always()}}"
+        commands:
+          - rm -rf $PWD

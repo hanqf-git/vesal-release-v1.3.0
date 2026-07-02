@@ -1,0 +1,18 @@
+# dependency of byte lib - gcc 6.3
+FROM hub.byted.org/base/ci_debian_stretch
+
+RUN apt --fix-broken install
+RUN sudo chmod 777 /tmp
+RUN sudo apt-get update --allow-insecure-repositories
+
+RUN apt-get install -yq
+RUN sudo apt-get install -yq -o Dpkg::Options::="--force-confnew" \
+    clang-format autoconf libtool pkg-config libboost-dev libboost-regex-dev libudev-dev nasm lcov libunwind-dev yasm clang-tidy valgrind libnuma-dev
+
+# install cmake-3.20.4
+ENV https_proxy=sys-proxy-rd-relay.byted.org:8118
+RUN wget https://cmake.org/files/v3.20/cmake-3.20.4-linux-x86_64.tar.gz -O /tmp/cmake.tar.gz && tar -zxf /tmp/cmake.tar.gz -C /tmp && mv /tmp/cmake-3.20.4-linux-x86_64/bin/cmake /usr/local/bin/cmake && mv /tmp/cmake-3.20.4-linux-x86_64/bin/ctest /usr/local/bin/ctest && mv /tmp/cmake-3.20.4-linux-x86_64/share/* /usr/local/share/ && rm -rf /tmp/cmake*
+ENV https_proxy=""
+
+RUN ldconfig
+RUN mkdir -p /opt/tiger/cores

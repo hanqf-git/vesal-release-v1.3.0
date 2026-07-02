@@ -1,0 +1,4 @@
+FROM hub.byted.org/aarch64/compile/bytedance.golang.compile_tango_1_24_bookworm:1.0.0.6
+
+RUN apt-get update
+RUN apt-get install -y valgrind libnuma-dev libunwind-dev

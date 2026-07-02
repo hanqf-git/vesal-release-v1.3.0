@@ -1,0 +1,63 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# Modified from the Apache Arrow project for the Terrier project.
+#
+---
+Checks: "
+  bugprone-*,
+  clang-analyzer-*,
+  google-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -bugprone-narrowing-conversions,
+  -readability-function-cognitive-complexity,
+  -bugprone-easily-swappable-parameters,
+  -modernize-avoid-c-arrays,
+  -clang-analyzer-deadcode.DeadStores,
+  -readability-convert-member-functions-to-static,
+  "
+CheckOptions:
+  - { key: readability-identifier-naming.ClassCase, value: CamelCase }
+  - { key: readability-identifier-naming.EnumCase, value: CamelCase }
+  - { key: readability-identifier-naming.FunctionCase, value: CamelCase }
+  - { key: readability-identifier-naming.GlobalConstantPrefix, value: k }
+  - { key: readability-identifier-naming.GlobalConstantCase, value: CamelCase }
+  - { key: readability-identifier-naming.MemberCase, value: lower_case }
+  - { key: readability-identifier-naming.ClassMemberSuffix, value: _ }
+  - { key: readability-identifier-naming.NamespaceCase, value: lower_case }
+  - { key: readability-identifier-naming.StructCase, value: CamelCase }
+  - { key: readability-identifier-naming.UnionCase, value: CamelCase }
+  - { key: readability-identifier-naming.VariableCase, value: lower_case }
+WarningsAsErrors: "*"
+AnalyzeTemporaryDtors: true
+#### Disabled checks and why: #####
+#
+# -modernize-use-trailing-return-type: we don't use trailing return types.
+# -readability-identifier-length: we have some variable name like 'cb'.
+# -readability-magic-numbers: we have some magic numbers in the code as we deal with hardwares in vesal.
+# -bugprone-narrowing-conversions: same as above. Sometimes vesal deal with hardware and needs this conversion. Consider enable it in future.
+# -readability-function-cognitive-complexity: No easy way to solve this, fix in future.
+# -bugprone-easily-swappable-parameters: too trivial, vesal don't do this.
+# -modernize-avoid-c-arrays: vesal have C-style arrays because we deal C libraries. Maybe fix in future.
+# -clang-analyzer-deadcode.DeadStores: sometimes we need to store variables thar used in debug mode, they are not used in release mode.
+# -readability-convert-member-functions-to-static: don't need this, should decide a function static or not by function usage.

@@ -1,0 +1,48 @@
+name: veSAL cronjob for running perf daily and collecting metrics
+trigger:
+  cron:
+  manual:
+
+jobs:
+  qat-hardware:
+    name: perf on QAT Hardware
+    image: none
+    runs-on:
+      cluster: "vesal_ci"
+      linux: {}
+    working-directory: "/data03/codebase_ci/ci_work_dir/${{random_string(16)}}"
+    steps:
+      - name: Build
+        commands:
+          - ./build.sh --enable_metrics
+      - name: Perf
+        commands:
+          - taskset -c 0 ./perf_simple --total_data_per_thread=1000 --source_size=4096 --inflight_num=128 --memory_type=register_2mb --channel_num=4 --vesal_metrics_sample_rate=0 --vesal_metrics_disable_poller_metrics=true --metrics_prefix=qat_cronjob --vesal_codec_qat_section_name=SSL0
+      - name: Deflate Perf
+        commands:
+          - taskset -c 0 ./perf_simple --total_data_per_thread=1000 --source_size=4096 --inflight_num=128 --memory_type=register_2mb --channel_num=4 --vesal_metrics_sample_rate=0 --vesal_metrics_disable_poller_metrics=true --metrics_prefix=qat_cronjob_deflate --vesal_codec_qat_section_name=SSL0 --algorithm_type=deflate
+      - name: Clean
+        if: "${{always()}}"
+        commands:
+          - rm -rf $PWD
+  dsa-hardware:
+    name: perf on DSA Hardware
+    image: none
+    runs-on:
+      cluster: "vesal_ci"
+      linux: {}
+    working-directory: "/data03/codebase_ci/ci_work_dir/${{random_string(16)}}"
+    steps:
+      - name: Build
+        commands:
+          - ./build.sh --enable_metrics
+      - name: Memmove Perf
+        commands:
+          - taskset -c 0 ./build/perf/data_flow/data_flow_perf --op=1 --io_depth=128 --chunk_size=4096 --batch_size=8 --perf_total_data=10000 --metrics_prefix=dsa_move_cronjob
+      - name: CRC Perf
+        commands:
+          - taskset -c 0 ./build/perf/data_flow/data_flow_perf --op=2 --io_depth=128 --chunk_size=4096 --batch_size=8 --perf_total_data=10000 --metrics_prefix=dsa_crc_cronjob
+      - name: Clean
+        if: "${{always()}}"
+        commands:
+          - rm -rf $PWD

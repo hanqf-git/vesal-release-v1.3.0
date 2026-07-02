@@ -1,0 +1,17 @@
+name: veSAL gcc630 build
+trigger:
+  # Run merge request pipeline automatically
+  # https://bytedance.feishu.cn/wiki/wikcn0XxotllYX3nzz7AEv1h07d#1gAE9h
+  change:
+  # https://bytedance.feishu.cn/wiki/wikcnmGR04aP3KhZmqr4qxDMNfb
+  manual:
+
+jobs:
+  gcc630-x64-build:
+    name: Build on gcc630
+    image: hub.byted.org/compile/vesal-stretch-gcc630-x64:9531553dfbb6da887447f7a211040805
+    working-directory: vesal
+    steps:
+      - name: Build
+        commands:
+          - bash build.sh --enable_err_sim

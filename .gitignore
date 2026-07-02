@@ -1,0 +1,7 @@
+build/
+.cache
+.vscode
+include/vesal/vesal_version.h
+perf_simple
+
+third/

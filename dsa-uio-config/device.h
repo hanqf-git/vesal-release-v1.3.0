@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0
+#ifndef __DEVICE_H__
+#define __DEVICE_H__
+
+struct tcfg;
+struct wq_info;
+
+int driver_init(struct tcfg *tcfg);
+void wq_info_get(void *wq, struct wq_info *wq_info);
+uint64_t rte_mem_virt2iova(void *p);
+int iommu_disabled(void);
+
+#endif
