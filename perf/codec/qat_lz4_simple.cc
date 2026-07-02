@@ -363,6 +363,18 @@ int main(int argc, char** argv) {
                     break;
                 }
 
+                auto latency = std::chrono::steady_clock::now() - req->submit_time;
+                if (latency > kAsyncRequestTimeout) {
+                    std::ostringstream oss;
+                    oss << "Thread " << tid << " async request latency warning: loop "
+                        << req->loop_index << " " << RequestType(req)
+                        << " request completed successfully after "
+                        << std::chrono::duration_cast<std::chrono::milliseconds>(latency).count()
+                        << " ms";
+                    set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
+                    break;
+                }
+
                 if (!req->is_decompress) {
                     compressed_input_bytes.fetch_add(src[req->slot_index].size(),
                                                      std::memory_order_relaxed);
