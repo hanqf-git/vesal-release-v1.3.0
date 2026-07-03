@@ -3,5 +3,7 @@ build/
 .vscode
 include/vesal/vesal_version.h
 perf_simple
+data_replay
+qat_lz4_simple
 
 third/

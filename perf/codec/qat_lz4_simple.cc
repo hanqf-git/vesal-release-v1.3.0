@@ -29,6 +29,9 @@ DEFINE_uint32(thread_num, 1, "Number of worker threads");
 DEFINE_uint32(loop_num, 100, "Compression/decompression loops per thread");
 DEFINE_uint32(input_size, 8 * 1024, "Input bytes for each compression request");
 DEFINE_uint32(inflight_num, 16, "Maximum async requests in flight per thread");
+DEFINE_uint32(decompress_interval,
+              1,
+              "Submit one decompression request for every N successful compression requests");
 DEFINE_int32(compression_level, 9, "LZ4 compression level [1, 12]");
 DEFINE_double(compress_ratio,
               1.0,
@@ -150,14 +153,17 @@ int main(int argc, char** argv) {
     if (FLAGS_thread_num == 0) {
         return PrintAndReturn("thread_num must be > 0", 10);
     }
-    if (FLAGS_thread_num > 8) {
-        return PrintAndReturn("thread_num must be <= 8 for stable testing", 15);
+    if (FLAGS_thread_num > 16) {
+        return PrintAndReturn("thread_num must be <= 16 for stable testing", 15);
     }
     if (FLAGS_loop_num == 0) {
         return PrintAndReturn("loop_num must be > 0", 11);
     }
     if (FLAGS_inflight_num == 0 || FLAGS_inflight_num > 256) {
         return PrintAndReturn("inflight_num must be in range [1, 256]", 16);
+    }
+    if (FLAGS_decompress_interval == 0) {
+        return PrintAndReturn("decompress_interval must be > 0", 19);
     }
     if (FLAGS_input_size == 0 || FLAGS_input_size > 512 * 1024 ||
         FLAGS_input_size % (4 * 1024) != 0) {
@@ -187,6 +193,8 @@ int main(int argc, char** argv) {
     }
 
     std::atomic<bool> stop{false};
+    std::atomic<uint64_t> compress_request_num{0};
+    std::atomic<uint64_t> decompress_request_num{0};
     std::atomic<uint64_t> compressed_input_bytes{0};
     std::atomic<uint64_t> decompressed_output_bytes{0};
     std::mutex err_mu;
@@ -199,6 +207,8 @@ int main(int argc, char** argv) {
     for (uint32_t tid = 0; tid < FLAGS_thread_num; ++tid) {
         workers.emplace_back([tid,
                               &stop,
+                              &compress_request_num,
+                              &decompress_request_num,
                               &compressed_input_bytes,
                               &decompressed_output_bytes,
                               &err_mu,
@@ -387,10 +397,21 @@ int main(int argc, char** argv) {
                 }
 
                 if (!req->is_decompress) {
+                    compress_request_num.fetch_add(1, std::memory_order_relaxed);
                     compressed_input_bytes.fetch_add(src[req->slot_index].size(),
                                                      std::memory_order_relaxed);
-                    if (!submit_decompress(req)) {
-                        break;
+                    if ((req->loop_index + 1) % FLAGS_decompress_interval == 0) {
+                        if (!submit_decompress(req)) {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    ++completed_loops;
+                    if (next_loop < FLAGS_loop_num && !stop.load(std::memory_order_relaxed)) {
+                        if (!submit_compress(req->slot_index)) {
+                            break;
+                        }
                     }
                     continue;
                 }
@@ -407,6 +428,7 @@ int main(int argc, char** argv) {
                     break;
                 }
 
+                decompress_request_num.fetch_add(1, std::memory_order_relaxed);
                 decompressed_output_bytes.fetch_add(req->result.produced, std::memory_order_relaxed);
                 ++completed_loops;
                 if (next_loop < FLAGS_loop_num && !stop.load(std::memory_order_relaxed)) {
@@ -477,8 +499,12 @@ int main(int argc, char** argv) {
               << ", input_size=" << FLAGS_input_size << " bytes"
               << ", compress_ratio=" << FLAGS_compress_ratio
               << ", data_fill_mode=" << FLAGS_data_fill_mode
+              << ", decompress_interval=" << FLAGS_decompress_interval
               << ", compression_level=" << FLAGS_compression_level
               << ", total_ops=" << total_ops
+              << ", compress_request_num=" << compress_request_num.load(std::memory_order_relaxed)
+              << ", decompress_request_num="
+              << decompress_request_num.load(std::memory_order_relaxed)
               << ", total_time=" << seconds << " s"
               << ", elapsed=" << seconds << " s"
               << ", compressed_input_bytes=" << compressed_input_bytes.load(std::memory_order_relaxed)

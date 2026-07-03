@@ -28,6 +28,10 @@ add_executable(qat_lz4_simple qat_lz4_simple.cc)
 target_link_libraries(qat_lz4_simple PRIVATE vesal_compile_options vesal
   tcmalloc-static gflags vesal_perf_includes)
 
+add_executable(data_replay data_replay.cc)
+target_link_libraries(data_replay PRIVATE vesal_compile_options vesal
+  tcmalloc-static gflags vesal_perf_includes)
+
 if(${VESAL_ENABLE_ZSTD})
   add_executable(zstd_perf zstd_perf.cc)
   target_link_libraries(zstd_perf PRIVATE vesal vesal_third_libs
@@ -41,4 +45,6 @@ if(${VESAL_ENABLE_BYTE_METRICS})
   target_link_libraries(perf_simple PRIVATE byte::metrics_holder unwind)
   target_compile_definitions(qat_lz4_simple PRIVATE VESAL_ENABLE_BYTE_METRICS)
   target_link_libraries(qat_lz4_simple PRIVATE byte::metrics_holder unwind)
+  target_compile_definitions(data_replay PRIVATE VESAL_ENABLE_BYTE_METRICS)
+  target_link_libraries(data_replay PRIVATE byte::metrics_holder unwind)
 endif()

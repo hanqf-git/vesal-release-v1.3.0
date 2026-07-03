@@ -148,3 +148,11 @@ cmake --build build -j $(nproc)
 cd $SOURCE_DIR
 rm -f perf_simple
 ln -s build/perf/codec/perf_simple perf_simple
+if [[ -x build/perf/codec/data_replay ]]; then
+    rm -f data_replay
+    cp build/perf/codec/data_replay data_replay
+fi
+if [[ -x build/perf/codec/qat_lz4_simple ]]; then
+    rm -f qat_lz4_simple
+    cp build/perf/codec/qat_lz4_simple qat_lz4_simple
+fi
