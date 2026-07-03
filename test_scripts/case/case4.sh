@@ -1,0 +1,2 @@
+numactl -N 0 ../../build/perf/codec/qat_lz4_simple --vesal_codec_qat_section_name=SSL0 --thread_num=16 --loop_num=300000000 --input_size=8192 compression_level=9 --inflight_num=32 --data_fill_mode="block"  --compress_ratio=0.0  --decompress_interval=3 &
+numactl -N 0 ../../build/perf/codec/qat_lz4_simple --vesal_codec_qat_section_name=SSL1 --thread_num=8 --loop_num=1500000000 --input_size=8192 compression_level=9 --inflight_num=32 --data_fill_mode="block"  --compress_ratio=0.0  --decompress_interval=3 &
