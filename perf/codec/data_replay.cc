@@ -38,9 +38,12 @@ DEFINE_string(replay_mode,
               "per_file",
               "Replay mode: per_file creates one worker per recent file; merged replays all "
               "records sorted by submit_ts_ns in one worker");
+DEFINE_uint32(loop_num, 1, "Number of times to replay the loaded records");
 DEFINE_uint32(inflight_num, 16, "Maximum async requests in flight per replay worker");
 DEFINE_uint32(max_records, 0, "Maximum records to replay per worker. 0 means all records");
 DEFINE_uint32(timeout_ms, 3000, "Timeout waiting for an async request completion");
+DEFINE_uint32(mem_pool_mb, 1024, "veSAL hugepage memory pool preallocation size in MiB");
+DEFINE_bool(debug, false, "Enable verbose replay progress logging");
 
 constexpr size_t kRecentRecordHeaderSize = 44;
 
@@ -97,6 +100,15 @@ struct ReplayResult {
     std::string error;
     ReplayStats stats;
 };
+
+void AddStats(ReplayStats* total, const ReplayStats& delta) {
+    total->submitted += delta.submitted;
+    total->completed += delta.completed;
+    total->compression += delta.compression;
+    total->decompression += delta.decompression;
+    total->bytes_in += delta.bytes_in;
+    total->bytes_out += delta.bytes_out;
+}
 
 uint64_t ReadLe64(const unsigned char* data) {
     uint64_t v = 0;
@@ -345,13 +357,12 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
 
     auto submit_next = [&]() -> bool {
         const RecentRecord& record = *records[next_index];
-        if (record.payload_truncated != 0 || record.payload_len != record.src_total_len ||
-            record.num_blocks != 1) {
+        if (record.payload_truncated != 0 || record.payload_len != record.src_total_len) {
             std::ostringstream oss;
             oss << name << " unsupported record req=" << record.req_id
                 << ", payload_truncated=" << static_cast<int>(record.payload_truncated)
                 << ", src_total_len=" << record.src_total_len
-                << ", payload_len=" << record.payload_len << ", num_blocks=" << record.num_blocks;
+                << ", payload_len=" << record.payload_len;
             set_error(oss.str(), 3);
             return false;
         }
@@ -444,6 +455,40 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
         }
     }
 
+    while (!active_requests.empty()) {
+        ssize_t n = channel->Poll(results, 64, 0);
+        if (n < 0) {
+            if (replay_result.ok) {
+                set_error(name + " poll failed while draining", 14);
+            }
+            break;
+        }
+        if (n == 0) {
+            if (std::chrono::steady_clock::now() - active_requests.front()->submit_time > timeout) {
+                if (replay_result.ok) {
+                    std::ostringstream oss;
+                    oss << name << " request timeout while draining req="
+                        << active_requests.front()->record->req_id
+                        << " type=" << RequestType(*active_requests.front()->record)
+                        << ", in_flight=" << active_requests.size();
+                    set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
+                }
+                break;
+            }
+            usleep(100);
+            continue;
+        }
+        for (ssize_t i = 0; i < n; ++i) {
+            auto* completed = static_cast<ActiveRequest*>(results[i].ctx);
+            auto it = std::find_if(active_requests.begin(), active_requests.end(), [completed](const std::unique_ptr<ActiveRequest>& ptr) {
+                return ptr.get() == completed;
+            });
+            if (it != active_requests.end()) {
+                active_requests.erase(it);
+            }
+        }
+    }
+
     vesal::Status close_status = channel->Close();
     if (!close_status.ok() && replay_result.ok) {
         replay_result.ok = false;
@@ -454,14 +499,16 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
     auto elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
         std::chrono::steady_clock::now() - start).count();
     double gib_per_s = elapsed > 0 ? replay_result.stats.bytes_in / 1024.0 / 1024.0 / 1024.0 / elapsed : 0;
-    std::cout << "Replay worker done, name=" << name << ", ok=" << replay_result.ok
-              << ", submitted=" << replay_result.stats.submitted
-              << ", completed=" << replay_result.stats.completed
-              << ", compression=" << replay_result.stats.compression
-              << ", decompression=" << replay_result.stats.decompression
-              << ", bytes_in=" << replay_result.stats.bytes_in
-              << ", bytes_out=" << replay_result.stats.bytes_out << ", elapsed=" << elapsed
-              << " s, throughput=" << gib_per_s << " GiB/s" << std::endl;
+    if (FLAGS_debug) {
+        std::cout << "Replay worker done, name=" << name << ", ok=" << replay_result.ok
+                  << ", submitted=" << replay_result.stats.submitted
+                  << ", completed=" << replay_result.stats.completed
+                  << ", compression=" << replay_result.stats.compression
+                  << ", decompression=" << replay_result.stats.decompression
+                  << ", bytes_in=" << replay_result.stats.bytes_in
+                  << ", bytes_out=" << replay_result.stats.bytes_out << ", elapsed=" << elapsed
+                  << " s, throughput=" << gib_per_s << " GiB/s" << std::endl;
+    }
     return replay_result;
 }
 
@@ -473,6 +520,22 @@ int PrintAndReturn(const std::string& msg, int code) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    gflags::SetUsageMessage(
+        "Replay bgworker timeout_recent_*.bin request dumps through veSAL QAT.\n"
+        "\n"
+        "Examples:\n"
+        "  data_replay --input_path=/path/to/sample_dir --replay_mode=per_file "
+        "--inflight_num=64 --loop_num=10 --mem_pool_mb=1024 "
+        "--vesal_codec_qat_section_name=SSL\n"
+        "  data_replay --input_path=/path/to/timeout_recent.bin --replay_mode=merged "
+        "--max_records=1024\n"
+        "\n"
+        "Replay modes:\n"
+        "  per_file  One worker and one dedicated QAT channel per timeout_recent file.\n"
+        "  merged    Merge all records by submit_ts_ns and replay them with one worker.\n"
+        "\n"
+        "The replay uses payloads embedded in timeout_recent_*.bin and checks only request "
+        "completion status.\n");
     gflags::ParseCommandLineFlags(&argc, &argv, true);
 
     if (FLAGS_input_path.empty()) {
@@ -480,6 +543,12 @@ int main(int argc, char** argv) {
     }
     if (FLAGS_inflight_num == 0 || FLAGS_inflight_num > 256) {
         return PrintAndReturn("inflight_num must be in range [1, 256]", 1);
+    }
+    if (FLAGS_loop_num == 0) {
+        return PrintAndReturn("loop_num must be > 0", 1);
+    }
+    if (FLAGS_mem_pool_mb == 0) {
+        return PrintAndReturn("mem_pool_mb must be > 0", 1);
     }
     if (FLAGS_replay_mode != "per_file" && FLAGS_replay_mode != "merged") {
         return PrintAndReturn("replay_mode must be one of: per_file, merged", 1);
@@ -497,9 +566,12 @@ int main(int argc, char** argv) {
     try {
         for (const auto& path : recent_paths) {
             RecentFile file = LoadRecentFile(path);
-            std::cout << "Loaded recent file, path=" << path << ", entries=" << file.records.size()
-                      << ", trigger_req_id=" << file.trigger_req_id << ", pid=" << file.pid
-                      << ", tid=" << file.tid << std::endl;
+            if (FLAGS_debug) {
+                std::cout << "Loaded recent file, path=" << path
+                          << ", entries=" << file.records.size()
+                          << ", trigger_req_id=" << file.trigger_req_id << ", pid=" << file.pid
+                          << ", tid=" << file.tid << std::endl;
+            }
             recent_files.push_back(std::move(file));
         }
     } catch (const std::exception& ex) {
@@ -512,12 +584,13 @@ int main(int argc, char** argv) {
     init_opt.data_flow_init_opt.init_dsa = false;
     init_opt.mem_pool_init_opt.init_mem_pool = true;
     init_opt.mem_pool_init_opt.prealloc_page_size = vesal::HugePageSize::k2MB;
-    init_opt.mem_pool_init_opt.prealloc_size_mb = 256;
+    init_opt.mem_pool_init_opt.prealloc_size_mb = FLAGS_mem_pool_mb;
 
     if (!vesal::Init(init_opt)) {
         return PrintAndReturn("vesal::Init failed", 1);
     }
 
+    auto replay_start = std::chrono::steady_clock::now();
     std::vector<ReplayResult> results;
     if (FLAGS_replay_mode == "merged") {
         std::vector<const RecentRecord*> records;
@@ -532,7 +605,20 @@ int main(int argc, char** argv) {
             }
             return lhs->req_id < rhs->req_id;
         });
-        results.push_back(ReplayRecords("merged", records));
+        ReplayResult merged_total;
+        for (uint32_t loop = 0; loop < FLAGS_loop_num; ++loop) {
+            std::ostringstream name;
+            name << "merged#" << loop;
+            ReplayResult loop_result = ReplayRecords(name.str(), records);
+            AddStats(&merged_total.stats, loop_result.stats);
+            if (!loop_result.ok) {
+                merged_total.ok = false;
+                merged_total.code = loop_result.code;
+                merged_total.error = loop_result.error;
+                break;
+            }
+        }
+        results.push_back(std::move(merged_total));
     } else {
         std::mutex result_mu;
         std::vector<std::thread> workers;
@@ -543,7 +629,19 @@ int main(int argc, char** argv) {
                 for (const auto& record : file.records) {
                     records.push_back(&record);
                 }
-                ReplayResult result = ReplayRecords(BaseName(file.path), records);
+                ReplayResult result;
+                for (uint32_t loop = 0; loop < FLAGS_loop_num; ++loop) {
+                    std::ostringstream name;
+                    name << BaseName(file.path) << "#" << loop;
+                    ReplayResult loop_result = ReplayRecords(name.str(), records);
+                    AddStats(&result.stats, loop_result.stats);
+                    if (!loop_result.ok) {
+                        result.ok = false;
+                        result.code = loop_result.code;
+                        result.error = loop_result.error;
+                        break;
+                    }
+                }
                 std::lock_guard<std::mutex> lock(result_mu);
                 results.push_back(std::move(result));
             });
@@ -552,6 +650,9 @@ int main(int argc, char** argv) {
             worker.join();
         }
     }
+    double replay_seconds = std::chrono::duration_cast<std::chrono::duration<double>>(
+                                std::chrono::steady_clock::now() - replay_start)
+                                .count();
 
     bool ok = true;
     ReplayStats total;
@@ -562,22 +663,27 @@ int main(int argc, char** argv) {
             code = result.code;
             std::cerr << result.error << std::endl;
         }
-        total.submitted += result.stats.submitted;
-        total.completed += result.stats.completed;
-        total.compression += result.stats.compression;
-        total.decompression += result.stats.decompression;
-        total.bytes_in += result.stats.bytes_in;
-        total.bytes_out += result.stats.bytes_out;
+        AddStats(&total, result.stats);
     }
 
     if (!vesal::Uninit()) {
         return PrintAndReturn("vesal::Uninit failed", 7);
     }
 
+    double input_gib_per_s = replay_seconds > 0
+                                 ? total.bytes_in / 1024.0 / 1024.0 / 1024.0 / replay_seconds
+                                 : 0;
+    double output_gib_per_s = replay_seconds > 0
+                                  ? total.bytes_out / 1024.0 / 1024.0 / 1024.0 / replay_seconds
+                                  : 0;
+
     std::cout << "Replay summary, ok=" << ok << ", files=" << recent_files.size()
-              << ", mode=" << FLAGS_replay_mode << ", submitted=" << total.submitted
+              << ", mode=" << FLAGS_replay_mode << ", loop_num=" << FLAGS_loop_num
+              << ", submitted=" << total.submitted
               << ", completed=" << total.completed << ", compression=" << total.compression
               << ", decompression=" << total.decompression << ", bytes_in=" << total.bytes_in
-              << ", bytes_out=" << total.bytes_out << std::endl;
+              << ", bytes_out=" << total.bytes_out << ", replay_time=" << replay_seconds << " s"
+              << ", input_throughput=" << input_gib_per_s << " GiB/s"
+              << ", output_throughput=" << output_gib_per_s << " GiB/s" << std::endl;
     return ok ? 0 : (code == 0 ? 1 : code);
 }
