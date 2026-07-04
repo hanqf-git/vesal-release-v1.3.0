@@ -5,6 +5,7 @@ include/vesal/vesal_version.h
 perf_simple
 data_replay
 qat_lz4_simple
-test_scripts/case/vesal.log
+vesal.log
+test_scripts/case/vesal*.log
 
 third/
