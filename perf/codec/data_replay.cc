@@ -10,8 +10,10 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <dirent.h>
+#include <csignal>
 #include <fstream>
 #include <gflags/gflags.h>
 #include <iostream>
@@ -21,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -46,6 +49,30 @@ DEFINE_uint32(mem_pool_mb, 1024, "veSAL hugepage memory pool preallocation size 
 DEFINE_bool(debug, false, "Enable verbose replay progress logging");
 
 constexpr size_t kRecentRecordHeaderSize = 44;
+constexpr size_t kMaxCrashSlots = 4096;
+
+struct CrashRecord {
+    uint64_t seq{0};
+    uint64_t req_id{0};
+    uint64_t submit_ts_ns{0};
+    uint64_t submit_wall_ms{0};
+    uint32_t src_total_len{0};
+    uint32_t dst_size{0};
+    uint32_t num_blocks{0};
+    uint32_t payload_len{0};
+    uint8_t direction{0};
+    uint8_t codec_algo{0};
+    uint8_t comp_level{0};
+    uint8_t payload_truncated{0};
+    pid_t tid{0};
+    char replay_name[96]{};
+    char source_file[512]{};
+};
+
+CrashRecord g_crash_records[kMaxCrashSlots];
+volatile sig_atomic_t g_crash_active[kMaxCrashSlots];
+volatile sig_atomic_t g_handling_crash_signal = 0;
+std::atomic<uint64_t> g_submit_seq{1};
 
 struct RecentRecord {
     uint64_t req_id{0};
@@ -83,6 +110,7 @@ struct ActiveRequest {
     vesal::IOBlock dst_block;
     vesal::CodecRequestArgs args;
     std::chrono::steady_clock::time_point submit_time;
+    size_t crash_slot{kMaxCrashSlots};
 };
 
 struct ReplayStats {
@@ -108,6 +136,174 @@ void AddStats(ReplayStats* total, const ReplayStats& delta) {
     total->decompression += delta.decompression;
     total->bytes_in += delta.bytes_in;
     total->bytes_out += delta.bytes_out;
+}
+
+void CopyCString(char* dst, size_t dst_size, const std::string& src) {
+    if (dst_size == 0) {
+        return;
+    }
+    size_t n = std::min(dst_size - 1, src.size());
+    std::memcpy(dst, src.data(), n);
+    dst[n] = '\0';
+}
+
+void AppendChar(char* buf, size_t buf_size, size_t* pos, char c) {
+    if (*pos + 1 < buf_size) {
+        buf[(*pos)++] = c;
+        buf[*pos] = '\0';
+    }
+}
+
+void AppendStr(char* buf, size_t buf_size, size_t* pos, const char* s) {
+    while (*s != '\0' && *pos + 1 < buf_size) {
+        buf[(*pos)++] = *s++;
+    }
+    buf[*pos] = '\0';
+}
+
+void AppendUint(char* buf, size_t buf_size, size_t* pos, uint64_t value) {
+    char tmp[32];
+    size_t tmp_pos = sizeof(tmp);
+    tmp[--tmp_pos] = '\0';
+    if (value == 0) {
+        tmp[--tmp_pos] = '0';
+    } else {
+        while (value > 0 && tmp_pos > 0) {
+            tmp[--tmp_pos] = static_cast<char>('0' + value % 10);
+            value /= 10;
+        }
+    }
+    AppendStr(buf, buf_size, pos, &tmp[tmp_pos]);
+}
+
+const char* SignalName(int sig) {
+    switch (sig) {
+    case SIGABRT:
+        return "SIGABRT";
+    case SIGSEGV:
+        return "SIGSEGV";
+    case SIGBUS:
+        return "SIGBUS";
+    case SIGILL:
+        return "SIGILL";
+    case SIGFPE:
+        return "SIGFPE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+void AppendCrashRecord(char* buf, size_t buf_size, size_t* pos, const CrashRecord& record) {
+    AppendStr(buf, buf_size, pos, "data_replay earliest in-flight request: seq=");
+    AppendUint(buf, buf_size, pos, record.seq);
+    AppendStr(buf, buf_size, pos, ", req_id=");
+    AppendUint(buf, buf_size, pos, record.req_id);
+    AppendStr(buf, buf_size, pos, ", direction=");
+    AppendUint(buf, buf_size, pos, record.direction);
+    AppendStr(buf, buf_size, pos, ", codec_algo=");
+    AppendUint(buf, buf_size, pos, record.codec_algo);
+    AppendStr(buf, buf_size, pos, ", comp_level=");
+    AppendUint(buf, buf_size, pos, record.comp_level);
+    AppendStr(buf, buf_size, pos, ", payload_truncated=");
+    AppendUint(buf, buf_size, pos, record.payload_truncated);
+    AppendStr(buf, buf_size, pos, ", src_total_len=");
+    AppendUint(buf, buf_size, pos, record.src_total_len);
+    AppendStr(buf, buf_size, pos, ", dst_size=");
+    AppendUint(buf, buf_size, pos, record.dst_size);
+    AppendStr(buf, buf_size, pos, ", num_blocks=");
+    AppendUint(buf, buf_size, pos, record.num_blocks);
+    AppendStr(buf, buf_size, pos, ", payload_len=");
+    AppendUint(buf, buf_size, pos, record.payload_len);
+    AppendStr(buf, buf_size, pos, ", submit_ts_ns=");
+    AppendUint(buf, buf_size, pos, record.submit_ts_ns);
+    AppendStr(buf, buf_size, pos, ", submit_wall_ms=");
+    AppendUint(buf, buf_size, pos, record.submit_wall_ms);
+    AppendStr(buf, buf_size, pos, ", tid=");
+    AppendUint(buf, buf_size, pos, static_cast<uint64_t>(record.tid));
+    AppendStr(buf, buf_size, pos, ", replay_name=");
+    AppendStr(buf, buf_size, pos, record.replay_name);
+    AppendStr(buf, buf_size, pos, ", source_bin=");
+    AppendStr(buf, buf_size, pos, record.source_file);
+    AppendChar(buf, buf_size, pos, '\n');
+}
+
+void CrashSignalHandler(int sig) {
+    if (g_handling_crash_signal) {
+        for (;;) {
+        }
+    }
+    g_handling_crash_signal = 1;
+
+    char msg[2048] = {};
+    size_t pos = 0;
+    AppendStr(msg, sizeof(msg), &pos, "\ndata_replay caught fatal signal: ");
+    AppendStr(msg, sizeof(msg), &pos, SignalName(sig));
+    AppendChar(msg, sizeof(msg), &pos, '\n');
+
+    int best = -1;
+    uint64_t best_seq = 0;
+    for (size_t i = 0; i < kMaxCrashSlots; ++i) {
+        if (!g_crash_active[i]) {
+            continue;
+        }
+        uint64_t seq = g_crash_records[i].seq;
+        if (seq != 0 && (best < 0 || seq < best_seq)) {
+            best = static_cast<int>(i);
+            best_seq = seq;
+        }
+    }
+    if (best >= 0) {
+        AppendCrashRecord(msg, sizeof(msg), &pos, g_crash_records[best]);
+    } else {
+        AppendStr(msg, sizeof(msg), &pos, "data_replay has no recorded in-flight request\n");
+    }
+
+    if (pos > 0) {
+        ssize_t ignored = write(STDERR_FILENO, msg, pos);
+        (void)ignored;
+    }
+
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+void InstallCrashSignalHandlers() {
+    signal(SIGABRT, CrashSignalHandler);
+    signal(SIGSEGV, CrashSignalHandler);
+    signal(SIGBUS, CrashSignalHandler);
+    signal(SIGILL, CrashSignalHandler);
+    signal(SIGFPE, CrashSignalHandler);
+}
+
+size_t RegisterCrashRecord(const RecentRecord& record, const std::string& replay_name) {
+    uint64_t seq = g_submit_seq.fetch_add(1, std::memory_order_relaxed);
+    size_t slot = seq % kMaxCrashSlots;
+    g_crash_active[slot] = 0;
+    CrashRecord& crash_record = g_crash_records[slot];
+    crash_record = CrashRecord{};
+    crash_record.seq = seq;
+    crash_record.req_id = record.req_id;
+    crash_record.submit_ts_ns = record.submit_ts_ns;
+    crash_record.submit_wall_ms = record.submit_wall_ms;
+    crash_record.src_total_len = record.src_total_len;
+    crash_record.dst_size = record.dst_size;
+    crash_record.num_blocks = record.num_blocks;
+    crash_record.payload_len = record.payload_len;
+    crash_record.direction = record.direction;
+    crash_record.codec_algo = record.codec_algo;
+    crash_record.comp_level = record.comp_level;
+    crash_record.payload_truncated = record.payload_truncated;
+    crash_record.tid = static_cast<pid_t>(syscall(SYS_gettid));
+    CopyCString(crash_record.replay_name, sizeof(crash_record.replay_name), replay_name);
+    CopyCString(crash_record.source_file, sizeof(crash_record.source_file), record.source_file);
+    g_crash_active[slot] = 1;
+    return slot;
+}
+
+void ClearCrashRecord(size_t slot) {
+    if (slot < kMaxCrashSlots) {
+        g_crash_active[slot] = 0;
+    }
 }
 
 uint64_t ReadLe64(const unsigned char* data) {
@@ -292,6 +488,35 @@ std::string RequestType(const RecentRecord& record) {
     return "unknown";
 }
 
+std::string RecordDebugString(const RecentRecord& record) {
+    std::ostringstream oss;
+    oss << "req=" << record.req_id << ", type=" << RequestType(record)
+        << ", direction=" << static_cast<int>(record.direction)
+        << ", codec_algo=" << static_cast<int>(record.codec_algo)
+        << ", comp_level=" << static_cast<int>(record.comp_level)
+        << ", payload_truncated=" << static_cast<int>(record.payload_truncated)
+        << ", src_total_len=" << record.src_total_len << ", dst_size=" << record.dst_size
+        << ", num_blocks=" << record.num_blocks << ", payload_len=" << record.payload_len
+        << ", submit_ts_ns=" << record.submit_ts_ns
+        << ", submit_wall_ms=" << record.submit_wall_ms << ", source_bin=" << record.source_file;
+    return oss.str();
+}
+
+std::string CurrentTimeString() {
+    timespec ts{};
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    tm local_tm{};
+    localtime_r(&ts.tv_sec, &local_tm);
+
+    char time_buf[32];
+    std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &local_tm);
+
+    char result[64];
+    std::snprintf(result, sizeof(result), "[%s.%09ld]", time_buf, ts.tv_nsec);
+    return result;
+}
+
 std::unique_ptr<ActiveRequest> BuildActiveRequest(const RecentRecord& record) {
     auto active = std::make_unique<ActiveRequest>();
     active->record = &record;
@@ -379,10 +604,12 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
         }
 
         auto active = BuildActiveRequest(record);
+        active->crash_slot = RegisterCrashRecord(record, name);
         vesal::StatusCode status = channel->SubmitAsync(active->args);
         if (!vesal::IsOk(status)) {
+            ClearCrashRecord(active->crash_slot);
             std::ostringstream oss;
-            oss << name << " submit failed req=" << record.req_id << " type=" << RequestType(record)
+            oss << name << " submit failed " << RecordDebugString(record)
                 << ", status=" << vesal::StatusCodeToString(status);
             set_error(oss.str(), ErrorCodeForStatus(status));
             return false;
@@ -414,8 +641,8 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
             if (!active_requests.empty() &&
                 std::chrono::steady_clock::now() - active_requests.front()->submit_time > timeout) {
                 std::ostringstream oss;
-                oss << name << " request timeout req=" << active_requests.front()->record->req_id
-                    << " type=" << RequestType(*active_requests.front()->record)
+                oss << name << " request timeout "
+                    << RecordDebugString(*active_requests.front()->record)
                     << ", in_flight=" << active_requests.size();
                 set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
                 break;
@@ -437,12 +664,15 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
             const RecentRecord& record = *(*it)->record;
             if (!vesal::IsOk(results[i].status)) {
                 std::ostringstream oss;
-                oss << name << " replay failed req=" << record.req_id << " type="
-                    << RequestType(record) << ", status=" << vesal::StatusCodeToString(results[i].status);
+                oss << name << " replay failed " << RecordDebugString(record)
+                    << ", status=" << vesal::StatusCodeToString(results[i].status);
                 set_error(oss.str(), ErrorCodeForStatus(results[i].status));
+                ClearCrashRecord((*it)->crash_slot);
+                active_requests.erase(it);
                 break;
             }
 
+            ClearCrashRecord((*it)->crash_slot);
             ++replay_result.stats.completed;
             replay_result.stats.bytes_in += record.src_total_len;
             replay_result.stats.bytes_out += results[i].produced;
@@ -467,9 +697,8 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
             if (std::chrono::steady_clock::now() - active_requests.front()->submit_time > timeout) {
                 if (replay_result.ok) {
                     std::ostringstream oss;
-                    oss << name << " request timeout while draining req="
-                        << active_requests.front()->record->req_id
-                        << " type=" << RequestType(*active_requests.front()->record)
+                    oss << name << " request timeout while draining "
+                        << RecordDebugString(*active_requests.front()->record)
                         << ", in_flight=" << active_requests.size();
                     set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
                 }
@@ -484,6 +713,7 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
                 return ptr.get() == completed;
             });
             if (it != active_requests.end()) {
+                ClearCrashRecord((*it)->crash_slot);
                 active_requests.erase(it);
             }
         }
@@ -520,6 +750,7 @@ int PrintAndReturn(const std::string& msg, int code) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    InstallCrashSignalHandlers();
     gflags::SetUsageMessage(
         "Replay bgworker timeout_recent_*.bin request dumps through veSAL QAT.\n"
         "\n"
@@ -677,7 +908,8 @@ int main(int argc, char** argv) {
                                   ? total.bytes_out / 1024.0 / 1024.0 / 1024.0 / replay_seconds
                                   : 0;
 
-    std::cout << "Replay summary, ok=" << ok << ", files=" << recent_files.size()
+    std::cout << CurrentTimeString() << " Replay summary, ok=" << ok
+              << ", files=" << recent_files.size()
               << ", mode=" << FLAGS_replay_mode << ", loop_num=" << FLAGS_loop_num
               << ", submitted=" << total.submitted
               << ", completed=" << total.completed << ", compression=" << total.compression
