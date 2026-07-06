@@ -27,7 +27,6 @@
 #include "common/defer.h"
 #ifdef VESAL_ENABLE_SSL
 #include "openssl/evp.h"
-#include "openssl/sha.h"
 #endif
 #include "vesal/cypher.h"
 #include "vesal/log_setting.h"
@@ -120,10 +119,16 @@ StatusCode SwCypherChannel::SubmitCypherReq(unsigned char* src,
         break;
     }
     case CypherAlgorithm::kSHA256: {
-        SHA256_CTX sha256;
-        SHA256_Init(&sha256);
-        SHA256_Update(&sha256, src, src_len);
-        SHA256_Final(dst, &sha256);
+        const EVP_MD* sha256 = EVP_sha256();
+        const int digest_len = EVP_MD_size(sha256);
+        if (digest_len <= 0 || dst_len < static_cast<unsigned int>(digest_len)) {
+            VESAL_LOG(ERROR) << "Invalid SHA256 destination buffer length";
+            return StatusCode::kInvalidArgument;
+        }
+        if (EVP_Digest(src, src_len, dst, nullptr, sha256, nullptr) != 1) {
+            VESAL_LOG(ERROR) << "Failed to calculate SHA256 digest";
+            return StatusCode::kUnknown;
+        }
         return StatusCode::kOk;
     }
     default:

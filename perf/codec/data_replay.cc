@@ -127,6 +127,7 @@ struct ReplayResult {
     int code{0};
     std::string error;
     ReplayStats stats;
+    bool abandoned_unsafe_channel{false};
 };
 
 void AddStats(ReplayStats* total, const ReplayStats& delta) {
@@ -719,11 +720,27 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
         }
     }
 
-    vesal::Status close_status = channel->Close();
-    if (!close_status.ok() && replay_result.ok) {
-        replay_result.ok = false;
-        replay_result.code = 5;
-        replay_result.error = name + " channel close failed: " + close_status.ToString();
+    if (!active_requests.empty()) {
+        if (replay_result.ok) {
+            std::ostringstream oss;
+            oss << name << " still has " << active_requests.size()
+                << " in-flight requests before channel close";
+            set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
+        }
+        replay_result.abandoned_unsafe_channel = true;
+        for (auto& active_request : active_requests) {
+            ClearCrashRecord(active_request->crash_slot);
+            active_request.release();
+        }
+        active_requests.clear();
+        channel.release();
+    } else {
+        vesal::Status close_status = channel->Close();
+        if (!close_status.ok() && replay_result.ok) {
+            replay_result.ok = false;
+            replay_result.code = 5;
+            replay_result.error = name + " channel close failed: " + close_status.ToString();
+        }
     }
 
     auto elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
@@ -842,6 +859,8 @@ int main(int argc, char** argv) {
             name << "merged#" << loop;
             ReplayResult loop_result = ReplayRecords(name.str(), records);
             AddStats(&merged_total.stats, loop_result.stats);
+            merged_total.abandoned_unsafe_channel = merged_total.abandoned_unsafe_channel ||
+                                                    loop_result.abandoned_unsafe_channel;
             if (!loop_result.ok) {
                 merged_total.ok = false;
                 merged_total.code = loop_result.code;
@@ -866,6 +885,8 @@ int main(int argc, char** argv) {
                     name << BaseName(file.path) << "#" << loop;
                     ReplayResult loop_result = ReplayRecords(name.str(), records);
                     AddStats(&result.stats, loop_result.stats);
+                    result.abandoned_unsafe_channel = result.abandoned_unsafe_channel ||
+                                                      loop_result.abandoned_unsafe_channel;
                     if (!loop_result.ok) {
                         result.ok = false;
                         result.code = loop_result.code;
@@ -886,15 +907,21 @@ int main(int argc, char** argv) {
                                 .count();
 
     bool ok = true;
+    bool abandoned_unsafe_channel = false;
     ReplayStats total;
     int code = 0;
     for (const auto& result : results) {
         ok = ok && result.ok;
+        abandoned_unsafe_channel = abandoned_unsafe_channel || result.abandoned_unsafe_channel;
         if (!result.ok && code == 0) {
             code = result.code;
             std::cerr << result.error << std::endl;
         }
         AddStats(&total, result.stats);
+    }
+
+    if (abandoned_unsafe_channel) {
+        return ok ? 1 : (code == 0 ? 1 : code);
     }
 
     if (!vesal::Uninit()) {

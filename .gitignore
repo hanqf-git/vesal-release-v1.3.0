@@ -8,4 +8,5 @@ qat_lz4_simple
 vesal.log
 test_scripts/case/vesal*.log
 
-third/
+third/*
+!third/CMakeLists.txt
