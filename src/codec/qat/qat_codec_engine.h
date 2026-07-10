@@ -130,6 +130,8 @@ public:
 
     Status Close();
 
+    StatusCode DumpDebugInfo();
+
     QatBufCache* GetQatBufCache() {
         return buf_cache_.get();
     }

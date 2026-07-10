@@ -211,6 +211,16 @@ MAKE_WRAPPER_FUNC_COMMON(dcDumpAllRings, CpaStatus, CpaInstanceHandle instanceHa
     return FUNC_PTR(dcDumpAllRings)(instanceHandle);
 }
 
+MAKE_WRAPPER_FUNC_COMMON(dcDumpHwRegs, CpaStatus, CpaInstanceHandle instanceHandle) {
+    if (UNLIKELY(!FUNC_PTR(dcDumpHwRegs))) {
+        DLOG("dcDumpHwRegs not found in qat driver. Might need to check if libqat_s.so is "
+             "compiled with QAT register dump support enabled.");
+        errno = EOPNOTSUPP;
+        return CPA_STATUS_UNSUPPORTED;
+    }
+    return FUNC_PTR(dcDumpHwRegs)(instanceHandle);
+}
+
 MAKE_WRAPPER_FUNC_COMMON(icp_sal_CyPollInstance,
                          CpaStatus,
                          CpaInstanceHandle instanceHandle,
@@ -352,6 +362,7 @@ static void qat_dummy_driver_reset(void) {
     FUNC_PTR(icp_sal_DcGetFileDescriptor) = NULL;
     FUNC_PTR(icp_sal_DcPutFileDescriptor) = NULL;
     FUNC_PTR(dcDumpAllRings) = NULL;
+    FUNC_PTR(dcDumpHwRegs) = NULL;
     FUNC_PTR(icp_sal_CyPollInstance) = NULL;
     // cpa_cy_common.h
     FUNC_PTR(cpaCyGetNumInstances) = NULL;
@@ -414,6 +425,7 @@ void LoadDC() {
     LOAD_SYM_COMMON(handle, icp_sal_DcGetFileDescriptor);
     LOAD_SYM_COMMON(handle, icp_sal_DcPutFileDescriptor);
     LOAD_SYM_OPTIONAL_COMMON(handle, dcDumpAllRings);
+    LOAD_SYM_OPTIONAL_COMMON(handle, dcDumpHwRegs);
     g_driver_load_codec_ok = 1;
     return;
 teardown:

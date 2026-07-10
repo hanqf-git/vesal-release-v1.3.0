@@ -486,6 +486,10 @@ public:
 
     virtual ssize_t Poll(CodecResult results[], unsigned int max_num, int timeout) = 0;
 
+    virtual StatusCode DumpDebugInfo() {
+        return StatusCode::kNotSupported;
+    }
+
     /**
      * @brief Close the channel. It will try to poll the remaining results if there is any.
      * The api will fail with RESOURCE_BUSY if there are still requests in flight after

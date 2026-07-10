@@ -317,6 +317,10 @@ Status QatCodecEngine::Close() {
     return OkStatus();
 }
 
+StatusCode QatCodecEngine::DumpDebugInfo() {
+    return qat_handle_->DumpDebugInfo();
+}
+
 StatusCode QatCodecEngine::SubmitAsyncRequest(const CodecDirection& dir,
                                               const std::vector<unsigned char*>& src,
                                               const std::vector<unsigned int>& src_len,

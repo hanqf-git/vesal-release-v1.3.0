@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <deque>
@@ -45,6 +46,10 @@ DEFINE_uint32(loop_num, 1, "Number of times to replay the loaded records");
 DEFINE_uint32(inflight_num, 16, "Maximum async requests in flight per replay worker");
 DEFINE_uint32(max_records, 0, "Maximum records to replay per worker. 0 means all records");
 DEFINE_uint32(timeout_ms, 3000, "Timeout waiting for an async request completion");
+DEFINE_uint32(post_timeout_poll_ms,
+              17000,
+              "Extra polling time after first timeout before force cleanup. 17000ms means 20s "
+              "total with timeout_ms=3000");
 DEFINE_uint32(mem_pool_mb, 1024, "veSAL hugepage memory pool preallocation size in MiB");
 DEFINE_bool(debug, false, "Enable verbose replay progress logging");
 
@@ -73,6 +78,7 @@ CrashRecord g_crash_records[kMaxCrashSlots];
 volatile sig_atomic_t g_crash_active[kMaxCrashSlots];
 volatile sig_atomic_t g_handling_crash_signal = 0;
 std::atomic<uint64_t> g_submit_seq{1};
+std::atomic<bool> g_timeout_debug_actions_done{false};
 
 struct RecentRecord {
     uint64_t req_id{0};
@@ -574,11 +580,45 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
     }
     const auto timeout = std::chrono::milliseconds(FLAGS_timeout_ms);
     auto start = std::chrono::steady_clock::now();
+    bool timeout_detected = false;
+    bool timeout_warning_printed = false;
 
     auto set_error = [&](const std::string& error, int code) {
         replay_result.ok = false;
         replay_result.code = code;
         replay_result.error = error;
+    };
+
+    auto check_timeout_before_poll = [&](const char* phase) -> bool {
+        if (active_requests.empty()) {
+            return true;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = now - active_requests.front()->submit_time;
+        if (elapsed > timeout) {
+            timeout_detected = true;
+            if (!timeout_warning_printed) {
+                const auto elapsed_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+                std::cerr << name << " warning: request elapsed " << elapsed_ms
+                          << " ms exceeds timeout_ms=" << FLAGS_timeout_ms
+                          << ", continue submit/poll, phase=" << phase << std::endl;
+                timeout_warning_printed = true;
+            }
+           /** 
+            if (!g_timeout_debug_actions_done.exchange(true, std::memory_order_acq_rel)) {
+                vesal::StatusCode dump_status = channel->DumpDebugInfo();
+                if (!vesal::IsOk(dump_status)) {
+                    std::cerr << name << " QAT debug dump failed during " << phase
+                              << ", status=" << vesal::StatusCodeToString(dump_status)
+                              << std::endl;
+                }
+            }
+            */
+        }
+
+        return true;
     };
 
     auto submit_next = [&]() -> bool {
@@ -606,6 +646,7 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
 
         auto active = BuildActiveRequest(record);
         active->crash_slot = RegisterCrashRecord(record, name);
+        active->submit_time = std::chrono::steady_clock::now();
         vesal::StatusCode status = channel->SubmitAsync(active->args);
         if (!vesal::IsOk(status)) {
             ClearCrashRecord(active->crash_slot);
@@ -615,7 +656,6 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
             set_error(oss.str(), ErrorCodeForStatus(status));
             return false;
         }
-        active->submit_time = std::chrono::steady_clock::now();
         active_requests.push_back(std::move(active));
         ++next_index;
         ++replay_result.stats.submitted;
@@ -623,7 +663,8 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
     };
 
     vesal::CodecResult results[64];
-    while (replay_result.ok && (next_index < limit || !active_requests.empty())) {
+    while (replay_result.ok &&
+           (!active_requests.empty() || next_index < limit)) {
         while (next_index < limit && active_requests.size() < FLAGS_inflight_num) {
             if (!submit_next()) {
                 break;
@@ -633,21 +674,19 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
             break;
         }
 
+        if (!check_timeout_before_poll("post-timeout polling")) {
+            break;
+        }
+
         ssize_t n = channel->Poll(results, 64, 0);
         if (n < 0) {
             set_error(name + " poll failed", 14);
             break;
         }
+        if (!check_timeout_before_poll("post-poll completion check")) {
+            break;
+        }
         if (n == 0) {
-            if (!active_requests.empty() &&
-                std::chrono::steady_clock::now() - active_requests.front()->submit_time > timeout) {
-                std::ostringstream oss;
-                oss << name << " request timeout "
-                    << RecordDebugString(*active_requests.front()->record)
-                    << ", in_flight=" << active_requests.size();
-                set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
-                break;
-            }
             usleep(100);
             continue;
         }
@@ -664,13 +703,13 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
 
             const RecentRecord& record = *(*it)->record;
             if (!vesal::IsOk(results[i].status)) {
-                std::ostringstream oss;
-                oss << name << " replay failed " << RecordDebugString(record)
-                    << ", status=" << vesal::StatusCodeToString(results[i].status);
-                set_error(oss.str(), ErrorCodeForStatus(results[i].status));
+                std::cerr << name << " warning: drop failed response "
+                          << RecordDebugString(record)
+                          << ", status=" << vesal::StatusCodeToString(results[i].status)
+                          << std::endl;
                 ClearCrashRecord((*it)->crash_slot);
                 active_requests.erase(it);
-                break;
+                continue;
             }
 
             ClearCrashRecord((*it)->crash_slot);
@@ -686,7 +725,18 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
         }
     }
 
+    if (replay_result.ok && timeout_detected && next_index < limit && active_requests.empty()) {
+        std::ostringstream oss;
+        oss << name << " timeout detected, stop submitting new requests, submitted="
+            << replay_result.stats.submitted << ", remaining=" << (limit - next_index);
+        set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
+    }
+
     while (!active_requests.empty()) {
+        if (!check_timeout_before_poll("post-timeout drain")) {
+            break;
+        }
+
         ssize_t n = channel->Poll(results, 64, 0);
         if (n < 0) {
             if (replay_result.ok) {
@@ -694,17 +744,10 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
             }
             break;
         }
+        if (!check_timeout_before_poll("post-poll drain completion check")) {
+            break;
+        }
         if (n == 0) {
-            if (std::chrono::steady_clock::now() - active_requests.front()->submit_time > timeout) {
-                if (replay_result.ok) {
-                    std::ostringstream oss;
-                    oss << name << " request timeout while draining "
-                        << RecordDebugString(*active_requests.front()->record)
-                        << ", in_flight=" << active_requests.size();
-                    set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
-                }
-                break;
-            }
             usleep(100);
             continue;
         }

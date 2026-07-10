@@ -91,6 +91,8 @@ public:
 
     ssize_t Poll(CodecResult results[], unsigned int max_num, int timeout) override;
 
+    StatusCode DumpDebugInfo() override;
+
     Status Close() override;
 
 private:

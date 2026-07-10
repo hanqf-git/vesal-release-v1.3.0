@@ -156,6 +156,10 @@ ssize_t QatCodecDedicatedChannel::Poll(CodecResult results[], unsigned int max_n
     return n;
 }
 
+StatusCode QatCodecDedicatedChannel::DumpDebugInfo() {
+    return qat_codec_engine_->DumpDebugInfo();
+}
+
 Status QatCodecDedicatedChannel::Close() {
     return qat_codec_engine_->Close();
 }
