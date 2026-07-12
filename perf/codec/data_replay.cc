@@ -42,6 +42,9 @@ DEFINE_string(replay_mode,
               "per_file",
               "Replay mode: per_file creates one worker per recent file; merged replays all "
               "records sorted by submit_ts_ns in one worker");
+DEFINE_string(replay_direction,
+              "all",
+              "Replay request direction: all, comp, or decomp");
 DEFINE_uint32(loop_num, 1, "Number of times to replay the loaded records");
 DEFINE_uint32(inflight_num, 16, "Maximum async requests in flight per replay worker");
 DEFINE_uint32(max_records, 0, "Maximum records to replay per worker. 0 means all records");
@@ -79,8 +82,10 @@ volatile sig_atomic_t g_crash_active[kMaxCrashSlots];
 volatile sig_atomic_t g_handling_crash_signal = 0;
 std::atomic<uint64_t> g_submit_seq{1};
 std::atomic<bool> g_timeout_debug_actions_done{false};
+std::atomic<bool> g_timeout_warning_printed_global{false};
 
 struct RecentRecord {
+    uint64_t payload_seq_in_file{0};
     uint64_t req_id{0};
     uint64_t submit_ts_ns{0};
     uint64_t submit_wall_ms{0};
@@ -136,6 +141,12 @@ struct ReplayResult {
     bool abandoned_unsafe_channel{false};
 };
 
+enum class ReplayDirectionFilter {
+    kAll,
+    kComp,
+    kDecomp,
+};
+
 void AddStats(ReplayStats* total, const ReplayStats& delta) {
     total->submitted += delta.submitted;
     total->completed += delta.completed;
@@ -143,6 +154,32 @@ void AddStats(ReplayStats* total, const ReplayStats& delta) {
     total->decompression += delta.decompression;
     total->bytes_in += delta.bytes_in;
     total->bytes_out += delta.bytes_out;
+}
+
+ReplayDirectionFilter ParseReplayDirectionFilter(const std::string& value) {
+    if (value == "all") {
+        return ReplayDirectionFilter::kAll;
+    }
+    if (value == "comp") {
+        return ReplayDirectionFilter::kComp;
+    }
+    if (value == "decomp") {
+        return ReplayDirectionFilter::kDecomp;
+    }
+    throw std::runtime_error(
+        "Invalid --replay_direction, expected one of: all, comp, decomp");
+}
+
+bool ShouldReplayRecord(const RecentRecord& record, ReplayDirectionFilter filter) {
+    switch (filter) {
+        case ReplayDirectionFilter::kAll:
+            return true;
+        case ReplayDirectionFilter::kComp:
+            return record.direction == static_cast<uint8_t>(vesal::CodecDirection::kComp);
+        case ReplayDirectionFilter::kDecomp:
+            return record.direction == static_cast<uint8_t>(vesal::CodecDirection::kDecomp);
+    }
+    return false;
 }
 
 void CopyCString(char* dst, size_t dst_size, const std::string& src) {
@@ -438,6 +475,7 @@ RecentFile LoadRecentFile(const std::string& path) {
                 throw std::runtime_error("Truncated record payload in " + path);
             }
         }
+        record.payload_seq_in_file = i;
         file.records.push_back(std::move(record));
     }
     return file;
@@ -497,7 +535,8 @@ std::string RequestType(const RecentRecord& record) {
 
 std::string RecordDebugString(const RecentRecord& record) {
     std::ostringstream oss;
-    oss << "req=" << record.req_id << ", type=" << RequestType(record)
+    oss << "payload_seq_in_file=" << record.payload_seq_in_file
+        << ", req=" << record.req_id << ", type=" << RequestType(record)
         << ", direction=" << static_cast<int>(record.direction)
         << ", codec_algo=" << static_cast<int>(record.codec_algo)
         << ", comp_level=" << static_cast<int>(record.comp_level)
@@ -599,23 +638,33 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
         if (elapsed > timeout) {
             timeout_detected = true;
             if (!timeout_warning_printed) {
-                const auto elapsed_ms =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-                std::cerr << name << " warning: request elapsed " << elapsed_ms
-                          << " ms exceeds timeout_ms=" << FLAGS_timeout_ms
-                          << ", continue submit/poll, phase=" << phase << std::endl;
+                bool expected = false;
+                if (g_timeout_warning_printed_global.compare_exchange_strong(
+                        expected, true, std::memory_order_acq_rel)) {
+                    const RecentRecord& timeout_record = *active_requests.front()->record;
+                    const auto elapsed_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+                    std::cerr << CurrentTimeString() << " " << name
+                              << " warning: request elapsed " << elapsed_ms
+                              << " ms exceeds timeout_ms=" << FLAGS_timeout_ms
+                              << ", source_bin=" << BaseName(timeout_record.source_file)
+                              << ", payload_seq_in_file=" << timeout_record.payload_seq_in_file
+                              << ", req_id=" << timeout_record.req_id
+                              << ", continue submit/poll, phase=" << phase << std::endl;
+                }
                 timeout_warning_printed = true;
             }
-           /** 
+           
             if (!g_timeout_debug_actions_done.exchange(true, std::memory_order_acq_rel)) {
                 vesal::StatusCode dump_status = channel->DumpDebugInfo();
                 if (!vesal::IsOk(dump_status)) {
-                    std::cerr << name << " QAT debug dump failed during " << phase
+                    std::cerr << CurrentTimeString() << " " << name
+                              << " QAT debug dump failed during " << phase
                               << ", status=" << vesal::StatusCodeToString(dump_status)
                               << std::endl;
                 }
             }
-            */
+
         }
 
         return true;
@@ -703,7 +752,8 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
 
             const RecentRecord& record = *(*it)->record;
             if (!vesal::IsOk(results[i].status)) {
-                std::cerr << name << " warning: drop failed response "
+                std::cerr << CurrentTimeString() << " " << name
+                          << " warning: drop failed response "
                           << RecordDebugString(record)
                           << ", status=" << vesal::StatusCodeToString(results[i].status)
                           << std::endl;
@@ -790,7 +840,8 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
         std::chrono::steady_clock::now() - start).count();
     double gib_per_s = elapsed > 0 ? replay_result.stats.bytes_in / 1024.0 / 1024.0 / 1024.0 / elapsed : 0;
     if (FLAGS_debug) {
-        std::cout << "Replay worker done, name=" << name << ", ok=" << replay_result.ok
+        std::cout << CurrentTimeString() << " Replay worker done, name=" << name
+              << ", ok=" << replay_result.ok
                   << ", submitted=" << replay_result.stats.submitted
                   << ", completed=" << replay_result.stats.completed
                   << ", compression=" << replay_result.stats.compression
@@ -803,7 +854,7 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
 }
 
 int PrintAndReturn(const std::string& msg, int code) {
-    std::cerr << msg << std::endl;
+    std::cerr << CurrentTimeString() << " " << msg << std::endl;
     return code;
 }
 
@@ -828,6 +879,13 @@ int main(int argc, char** argv) {
         "The replay uses payloads embedded in timeout_recent_*.bin and checks only request "
         "completion status.\n");
     gflags::ParseCommandLineFlags(&argc, &argv, true);
+
+    ReplayDirectionFilter replay_direction_filter;
+    try {
+        replay_direction_filter = ParseReplayDirectionFilter(FLAGS_replay_direction);
+    } catch (const std::exception& ex) {
+        return PrintAndReturn(ex.what(), 1);
+    }
 
     if (FLAGS_input_path.empty()) {
         return PrintAndReturn("input_path must be set", 1);
@@ -858,7 +916,7 @@ int main(int argc, char** argv) {
         for (const auto& path : recent_paths) {
             RecentFile file = LoadRecentFile(path);
             if (FLAGS_debug) {
-                std::cout << "Loaded recent file, path=" << path
+                std::cout << CurrentTimeString() << " Loaded recent file, path=" << path
                           << ", entries=" << file.records.size()
                           << ", trigger_req_id=" << file.trigger_req_id << ", pid=" << file.pid
                           << ", tid=" << file.tid << std::endl;
@@ -887,7 +945,9 @@ int main(int argc, char** argv) {
         std::vector<const RecentRecord*> records;
         for (const auto& file : recent_files) {
             for (const auto& record : file.records) {
-                records.push_back(&record);
+                if (ShouldReplayRecord(record, replay_direction_filter)) {
+                    records.push_back(&record);
+                }
             }
         }
         std::sort(records.begin(), records.end(), [](const RecentRecord* lhs, const RecentRecord* rhs) {
@@ -916,11 +976,13 @@ int main(int argc, char** argv) {
         std::mutex result_mu;
         std::vector<std::thread> workers;
         for (const auto& file : recent_files) {
-            workers.emplace_back([&file, &result_mu, &results]() {
+            workers.emplace_back([&file, replay_direction_filter, &result_mu, &results]() {
                 std::vector<const RecentRecord*> records;
                 records.reserve(file.records.size());
                 for (const auto& record : file.records) {
-                    records.push_back(&record);
+                    if (ShouldReplayRecord(record, replay_direction_filter)) {
+                        records.push_back(&record);
+                    }
                 }
                 ReplayResult result;
                 for (uint32_t loop = 0; loop < FLAGS_loop_num; ++loop) {
@@ -958,7 +1020,7 @@ int main(int argc, char** argv) {
         abandoned_unsafe_channel = abandoned_unsafe_channel || result.abandoned_unsafe_channel;
         if (!result.ok && code == 0) {
             code = result.code;
-            std::cerr << result.error << std::endl;
+            std::cerr << CurrentTimeString() << " " << result.error << std::endl;
         }
         AddStats(&total, result.stats);
     }
@@ -980,7 +1042,9 @@ int main(int argc, char** argv) {
 
     std::cout << CurrentTimeString() << " Replay summary, ok=" << ok
               << ", files=" << recent_files.size()
-              << ", mode=" << FLAGS_replay_mode << ", loop_num=" << FLAGS_loop_num
+              << ", mode=" << FLAGS_replay_mode
+              << ", replay_direction=" << FLAGS_replay_direction
+              << ", loop_num=" << FLAGS_loop_num
               << ", submitted=" << total.submitted
               << ", completed=" << total.completed << ", compression=" << total.compression
               << ", decompression=" << total.decompression << ", bytes_in=" << total.bytes_in
