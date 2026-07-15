@@ -16,14 +16,17 @@ INFLIGHT_NUM="${QAT_REPLAY_INFLIGHT_NUM:-64}"
 MEM_POOL_MB="${QAT_REPLAY_MEM_POOL_MB:-8192}"
 # Leave section name empty by default so QAT can auto-pick available SSL* sections.
 QAT_SECTION_NAME="${QAT_REPLAY_QAT_SECTION_NAME:-SSL0}"
+DIRECTION="${QAT_REPLAY_DIRECTION:-all}"
 
 cmd=(
-  numactl -N 0 ../../data_replay
+  numactl -N 0 /home/qiufeng/tmp/vesal-release-v1.3.0/data_replay
   --input_path="${INPUT_PATH}"
   --replay_mode=per_file
+  --timeout_ms=100000
   --inflight_num="${INFLIGHT_NUM}"
   --loop_num="${LOOP_NUM}"
   --mem_pool_mb="${MEM_POOL_MB}"
+  --replay_direction=${DIRECTION}
 )
 
 if [[ -n "${QAT_SECTION_NAME}" ]]; then

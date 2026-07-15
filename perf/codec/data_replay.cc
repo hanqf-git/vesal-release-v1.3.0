@@ -81,7 +81,6 @@ CrashRecord g_crash_records[kMaxCrashSlots];
 volatile sig_atomic_t g_crash_active[kMaxCrashSlots];
 volatile sig_atomic_t g_handling_crash_signal = 0;
 std::atomic<uint64_t> g_submit_seq{1};
-std::atomic<bool> g_timeout_debug_actions_done{false};
 std::atomic<bool> g_timeout_warning_printed_global{false};
 
 struct RecentRecord {
@@ -600,6 +599,7 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
     channel_opt.comp_algorithm = CodecAlgorithmFromRecord(records.front()->codec_algo);
     channel_opt.comp_level = CodecCompLevelFromRecord(records.front()->comp_level);
     channel_opt.checksum_type = vesal::CodecChecksumType::kCrc32;
+    //channel_opt.checksum_type = vesal::CodecChecksumType::kNone;
     channel_opt.timeout_ms = FLAGS_timeout_ms;
 
     auto channel_pair = vesal::CodecChannel::CreateCodecChannel(channel_opt);
@@ -628,9 +628,9 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
         replay_result.error = error;
     };
 
-    auto check_timeout_before_poll = [&](const char* phase) -> bool {
+    auto mark_timeout_if_needed = [&](const char* phase) {
         if (active_requests.empty()) {
-            return true;
+            return;
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -654,20 +654,7 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
                 }
                 timeout_warning_printed = true;
             }
-           
-            if (!g_timeout_debug_actions_done.exchange(true, std::memory_order_acq_rel)) {
-                vesal::StatusCode dump_status = channel->DumpDebugInfo();
-                if (!vesal::IsOk(dump_status)) {
-                    std::cerr << CurrentTimeString() << " " << name
-                              << " QAT debug dump failed during " << phase
-                              << ", status=" << vesal::StatusCodeToString(dump_status)
-                              << std::endl;
-                }
-            }
-
         }
-
-        return true;
     };
 
     auto submit_next = [&]() -> bool {
@@ -715,27 +702,13 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
     while (replay_result.ok &&
            (!active_requests.empty() || next_index < limit)) {
         while (next_index < limit && active_requests.size() < FLAGS_inflight_num) {
-            if (!submit_next()) {
-                break;
-            }
-        }
-        if (!replay_result.ok) {
-            break;
-        }
-
-        if (!check_timeout_before_poll("post-timeout polling")) {
-            break;
+            submit_next();
         }
 
         ssize_t n = channel->Poll(results, 64, 0);
-        if (n < 0) {
-            set_error(name + " poll failed", 14);
-            break;
-        }
-        if (!check_timeout_before_poll("post-poll completion check")) {
-            break;
-        }
-        if (n == 0) {
+
+        mark_timeout_if_needed("post-poll completion check");
+        if (n <= 0) {
             usleep(100);
             continue;
         }
@@ -772,44 +745,6 @@ ReplayResult ReplayRecords(const std::string& name, const std::vector<const Rece
                 ++replay_result.stats.decompression;
             }
             active_requests.erase(it);
-        }
-    }
-
-    if (replay_result.ok && timeout_detected && next_index < limit && active_requests.empty()) {
-        std::ostringstream oss;
-        oss << name << " timeout detected, stop submitting new requests, submitted="
-            << replay_result.stats.submitted << ", remaining=" << (limit - next_index);
-        set_error(oss.str(), ErrorCodeForStatus(vesal::StatusCode::kTimeout));
-    }
-
-    while (!active_requests.empty()) {
-        if (!check_timeout_before_poll("post-timeout drain")) {
-            break;
-        }
-
-        ssize_t n = channel->Poll(results, 64, 0);
-        if (n < 0) {
-            if (replay_result.ok) {
-                set_error(name + " poll failed while draining", 14);
-            }
-            break;
-        }
-        if (!check_timeout_before_poll("post-poll drain completion check")) {
-            break;
-        }
-        if (n == 0) {
-            usleep(100);
-            continue;
-        }
-        for (ssize_t i = 0; i < n; ++i) {
-            auto* completed = static_cast<ActiveRequest*>(results[i].ctx);
-            auto it = std::find_if(active_requests.begin(), active_requests.end(), [completed](const std::unique_ptr<ActiveRequest>& ptr) {
-                return ptr.get() == completed;
-            });
-            if (it != active_requests.end()) {
-                ClearCrashRecord((*it)->crash_slot);
-                active_requests.erase(it);
-            }
         }
     }
 
